@@ -14,6 +14,7 @@ from tau2.evaluator.evaluator import EvaluationType, evaluate_simulation
 from tau2.orchestrator.full_duplex_orchestrator import FullDuplexOrchestrator
 from tau2.orchestrator.modes import CommunicationMode
 from tau2.orchestrator.orchestrator import Orchestrator
+from tau2.utils import telemetry
 
 
 def run_simulation(
@@ -73,15 +74,16 @@ def run_simulation(
     solo_mode = getattr(orchestrator, "solo_mode", False)
 
     # Evaluate
-    reward_info = evaluate_simulation(
-        simulation=simulation,
-        task=task,
-        evaluation_type=evaluation_type,
-        solo_mode=solo_mode,
-        domain=domain,
-        mode=mode,
-        env_kwargs=env_kwargs,
-    )
+    with telemetry.in_component("evaluation"):
+        reward_info = evaluate_simulation(
+            simulation=simulation,
+            task=task,
+            evaluation_type=evaluation_type,
+            solo_mode=solo_mode,
+            domain=domain,
+            mode=mode,
+            env_kwargs=env_kwargs,
+        )
     simulation.reward_info = reward_info
 
     logger.info(

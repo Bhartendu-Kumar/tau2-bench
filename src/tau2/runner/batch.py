@@ -53,6 +53,7 @@ from tau2.user.user_simulator import (
     get_global_user_sim_guidelines_voice,
 )
 from tau2.user_simulation_voice_presets import COMPLEXITY_CONFIGS
+from tau2.utils import telemetry
 from tau2.utils.display import ConsoleDisplay, Text
 from tau2.utils.llm_utils import llm_log_mode, set_llm_log_dir, set_llm_log_mode
 from tau2.utils.utils import DATA_DIR
@@ -275,6 +276,8 @@ class _TaskLogContext:
         self._handler_id = None
 
     def __enter__(self):
+        self._simulation_token = _current_simulation_id.set(self.simulation_id)
+        telemetry.instance_started(self.simulation_id)
         if self.save_dir:
             self.task_log_dir = (
                 self.save_dir
@@ -285,7 +288,6 @@ class _TaskLogContext:
 
         if self.verbose_logs and self.task_log_dir:
             self.task_log_dir.mkdir(parents=True, exist_ok=True)
-            _current_simulation_id.set(self.simulation_id)
 
             def make_simulation_filter(sim_id: str):
                 def simulation_filter(record):
@@ -311,6 +313,7 @@ class _TaskLogContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        telemetry.instance_ended(exc_val)
         if exc_type is not None and self.task_log_dir and self.task_log_dir.exists():
             status = {
                 "status": "failed",
@@ -329,7 +332,7 @@ class _TaskLogContext:
             set_llm_log_dir(None)
         if self._handler_id is not None:
             logger.remove(self._handler_id)
-            _current_simulation_id.set(None)
+        _current_simulation_id.reset(self._simulation_token)
         return False
 
 
@@ -562,7 +565,8 @@ def run_tasks(
                 [retrieval_config],
                 kwargs,
             )
-        warm_kb_cache(embedder_configs)
+        with telemetry.in_component("setup"):
+            warm_kb_cache(embedder_configs)
         knowledge_base = get_knowledge_base()
         policy_override = get_info_policy_override(
             retrieval_config, knowledge_base, **kwargs
@@ -673,18 +677,19 @@ def run_tasks(
             )
 
         try:
-            result = run_with_retry(
-                _execute,
-                task=task,
-                trial=trial,
-                seed=seed,
-                max_retries=config.max_retries,
-                retry_delay=config.retry_delay,
-                console_display=console_display,
-                save_fn=save_fn,
-                on_retry=lambda: monitor.task_restarted(task_key),
-                shutdown_event=shutdown_event,
-            )
+            with telemetry.in_attempt(task.id, trial):
+                result = run_with_retry(
+                    _execute,
+                    task=task,
+                    trial=trial,
+                    seed=seed,
+                    max_retries=config.max_retries,
+                    retry_delay=config.retry_delay,
+                    console_display=console_display,
+                    save_fn=save_fn,
+                    on_retry=lambda: monitor.task_restarted(task_key),
+                    shutdown_event=shutdown_event,
+                )
 
             # Hallucination retry: if check detects fabricated info, re-run
             is_full_duplex = result.ticks is not None and len(result.ticks) > 0

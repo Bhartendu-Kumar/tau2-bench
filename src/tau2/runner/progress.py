@@ -12,6 +12,7 @@ from loguru import logger
 
 from tau2.data_model.simulation import Results, SimulationRun, TerminationReason
 from tau2.data_model.tasks import Task
+from tau2.utils import telemetry
 from tau2.utils.display import ConsoleDisplay, Text
 from tau2.utils.utils import get_now
 
@@ -74,6 +75,7 @@ def run_with_retry(
 
             simulation = run_fn()
             simulation.trial = trial
+            telemetry.attach_instances(simulation)
 
             if console_display:
                 ConsoleDisplay.display_simulation(simulation, show_details=False)
@@ -90,6 +92,7 @@ def run_with_retry(
             return simulation
 
         except Exception as e:
+            telemetry.runner_failed(e)
             last_exception = e
             last_error_reason = str(e)
             last_traceback = traceback.format_exc()
@@ -128,6 +131,7 @@ def run_with_retry(
             "failed_after_attempts": max_attempts,
         },
     )
+    telemetry.attach_instances(failed_simulation)
     if save_fn:
         save_fn(failed_simulation)
     return failed_simulation

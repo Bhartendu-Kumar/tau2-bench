@@ -34,6 +34,7 @@ from tau2.user.user_simulator_base import (
     UserError,
     is_valid_user_history_message,
 )
+from tau2.utils import telemetry
 from tau2.utils.llm_utils import get_cost
 from tau2.utils.utils import format_time, get_now
 
@@ -322,7 +323,8 @@ class BaseOrchestrator(ABC, Generic[BaseAgentT, BaseUserT, TrajectoryItemT]):
         """
         tool_results = []
         for tool_call in tool_calls:
-            tool_result = self.environment.get_response(tool_call)
+            with telemetry.in_component("tool", self.step_count, tool_call.id):
+                tool_result = self.environment.get_response(tool_call)
             if tool_result.error:
                 self.num_errors += 1
             tool_results.append(tool_result)
@@ -638,9 +640,10 @@ class Orchestrator(BaseOrchestrator[AgentT, UserT, Message]):
                 self.to_role = Role.USER
             else:
                 self.agent_state = self.agent.get_init_state()
-                first_message, self.agent_state = self.agent.generate_next_message(
-                    None, self.agent_state
-                )
+                with telemetry.in_component("agent", self.step_count):
+                    first_message, self.agent_state = self.agent.generate_next_message(
+                        None, self.agent_state
+                    )
                 self.trajectory = [first_message]
                 self.message = first_message
                 # In solo mode, there is no user, so if the message is not a tool call, then we end and report an agent error
@@ -838,9 +841,10 @@ class Orchestrator(BaseOrchestrator[AgentT, UserT, Message]):
         )
         # AGENT/ENV -> USER
         if self.from_role in [Role.AGENT, Role.ENV] and self.to_role == Role.USER:
-            user_msg, self.user_state = self.user.generate_next_message(
-                self.message, self.user_state
-            )
+            with telemetry.in_component("user_simulator", self.step_count):
+                user_msg, self.user_state = self.user.generate_next_message(
+                    self.message, self.user_state
+                )
             user_msg.validate()
             if UserSimulator.is_stop(user_msg):
                 self.done = True
@@ -859,9 +863,10 @@ class Orchestrator(BaseOrchestrator[AgentT, UserT, Message]):
         elif (
             self.from_role == Role.USER or self.from_role == Role.ENV
         ) and self.to_role == Role.AGENT:
-            agent_msg, self.agent_state = self.agent.generate_next_message(
-                self.message, self.agent_state
-            )
+            with telemetry.in_component("agent", self.step_count):
+                agent_msg, self.agent_state = self.agent.generate_next_message(
+                    self.message, self.agent_state
+                )
             agent_msg.validate()
             if self.agent.is_stop(agent_msg):
                 self.done = True
