@@ -570,6 +570,10 @@ class ToolMessage(BaseModel):
     timestamp: Optional[str] = Field(
         description="The timestamp of the message.", default_factory=get_now
     )
+    execution_time_seconds: Optional[float] = Field(
+        description="Wall clock time (seconds) of the tool's execution.",
+        default=None,
+    )
 
     def __str__(self) -> str:
         lines = [f"ToolMessage (responding to {self.requestor})"]

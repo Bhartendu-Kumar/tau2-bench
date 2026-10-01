@@ -324,7 +324,9 @@ class BaseOrchestrator(ABC, Generic[BaseAgentT, BaseUserT, TrajectoryItemT]):
         tool_results = []
         for tool_call in tool_calls:
             with telemetry.in_component("tool", self.step_count, tool_call.id):
+                start = time.perf_counter()
                 tool_result = self.environment.get_response(tool_call)
+                tool_result.execution_time_seconds = time.perf_counter() - start
             if tool_result.error:
                 self.num_errors += 1
             tool_results.append(tool_result)

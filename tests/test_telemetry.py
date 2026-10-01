@@ -1,4 +1,4 @@
-"""Passive run telemetry: attempt, instance and component keys, and instance records.
+"""Passive run telemetry: attempt, instance and component keys, instance records and tool execution time.
 
 The runs below go through Tau3's own runner, retry loop, orchestrator and evaluator on the mock domain. Only the
 model is scripted, so no model is called.
@@ -128,6 +128,20 @@ def test_requests_carry_attempt_instance_component_and_step(
     # Nothing leaks out of the run.
     assert telemetry.attempt.get() is None and telemetry.component.get() is None
     assert batch._current_simulation_id.get() is None
+
+
+def test_tool_messages_record_execution_time(
+    monkeypatch, domain_name, base_task, tmp_path
+):
+    with scripted(monkeypatch, ScriptedModel()):
+        simulation, saved = run(domain_name, base_task, tmp_path)
+
+    tools = [m for m in simulation.messages if m.role == "tool"]
+    assert len(tools) == 1 and tools[0].execution_time_seconds >= 0
+    saved_tools = [
+        m for m in saved["simulations"][0]["messages"] if m["role"] == "tool"
+    ]
+    assert saved_tools[0]["execution_time_seconds"] == tools[0].execution_time_seconds
 
 
 def test_kept_instance_record_is_saved(monkeypatch, domain_name, base_task, tmp_path):
