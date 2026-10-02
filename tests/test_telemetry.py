@@ -44,6 +44,7 @@ class ScriptedModel:
                 "instance": instance,
                 "component": telemetry.component.get(),
                 "attempt": (attempt["task_id"], attempt["trial"]) if attempt else None,
+                "keys": telemetry.keys(),
             }
         )
         n = self.steps[instance, call_name]
@@ -72,6 +73,7 @@ def scripted(monkeypatch, model):
 
     def recording_get_response(self, message):
         seen["tool"] = telemetry.component.get()
+        seen["tool_keys"] = telemetry.keys()
         return get_response(self, message)
 
     def recording_evaluate(*args, **kwargs):
@@ -125,6 +127,22 @@ def test_requests_carry_attempt_instance_component_and_step(
     ]
     assert seen["tool"] == ("tool", 2, "call-1")
     assert seen["evaluation"] == ("evaluation", None, None)
+    attempt_keys = {"task": base_task.id, "trial": 0, "instance": simulation.id}
+    assert [c["keys"] for c in model.calls] == [
+        {**attempt_keys, "component": name, "step": step, "tool_call_id": None}
+        for name, step in [
+            ("user_simulator", 0),
+            ("agent", 1),
+            ("agent", 3),
+            ("user_simulator", 4),
+        ]
+    ]
+    assert seen["tool_keys"] == {
+        **attempt_keys,
+        "component": "tool",
+        "step": 2,
+        "tool_call_id": "call-1",
+    }
     # Nothing leaks out of the run.
     assert telemetry.attempt.get() is None and telemetry.component.get() is None
     assert batch._current_simulation_id.get() is None
@@ -247,6 +265,25 @@ def test_without_an_attempt_nothing_is_recorded():
     )
     telemetry.attach_instances(simulation)
     assert simulation.info is None
+    assert telemetry.keys() == dict.fromkeys(
+        ["task", "trial", "instance", "component", "step", "tool_call_id"]
+    )
+
+
+def test_keys_name_the_current_attempt_instance_and_component():
+    with telemetry.in_attempt("task-9", 3):
+        telemetry.instance_started("first")
+        telemetry.instance_ended(ValueError("discarded"))
+        telemetry.instance_started("second")
+        with telemetry.in_component("tool", 5, "call-7"):
+            assert telemetry.keys() == {
+                "task": "task-9",
+                "trial": 3,
+                "instance": "second",
+                "component": "tool",
+                "step": 5,
+                "tool_call_id": "call-7",
+            }
 
 
 @pytest.mark.parametrize("raised", [ValueError("boom"), KeyboardInterrupt()])

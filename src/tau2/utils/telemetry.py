@@ -49,6 +49,22 @@ def current_instance() -> Optional[dict]:
     return record["instances"][-1] if record and record["instances"] else None
 
 
+def keys() -> dict:
+    """The keys of the work in this context, for a recorder: the attempt (task and trial), the instance, the
+    component, the orchestrator step and the tool call. Each is None outside its scope."""
+    record = attempt.get()
+    instance = current_instance()
+    name, step, tool_call_id = component.get() or (None, None, None)
+    return {
+        "task": record["task_id"] if record else None,
+        "trial": record["trial"] if record else None,
+        "instance": instance["id"] if instance else None,
+        "component": name,
+        "step": step,
+        "tool_call_id": tool_call_id,
+    }
+
+
 def _thread_times() -> tuple:
     """This thread's CPU time, and its time on a CPU and waiting for one (Linux scheduler statistics, else None)."""
     try:
