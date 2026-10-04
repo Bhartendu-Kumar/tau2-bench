@@ -574,6 +574,11 @@ class ToolMessage(BaseModel):
         description="Wall clock time (seconds) of the tool's execution.",
         default=None,
     )
+    reported_failure: Optional[bool] = Field(
+        description="Whether the tool returned its failure as text instead of raising, "
+        "as the shell does for a command that fails.",
+        default=None,
+    )
 
     def __str__(self) -> str:
         lines = [f"ToolMessage (responding to {self.requestor})"]

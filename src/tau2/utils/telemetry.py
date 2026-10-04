@@ -1,15 +1,17 @@
-"""Passive run telemetry: which attempt, instance and component is active, and per-instance thread timing.
+"""Passive run telemetry: which attempt, instance and component is active, per-instance thread timing, the
+trajectory of a discarded instance, and the failure a tool reports in its result.
 
 An in-process recorder reads these context variables to attribute each model request to its attempt, episode
 instance, component (agent, user_simulator, tool, evaluation, setup) and orchestrator step. A request inside an
-instance with no component belongs to orchestration. Setting them changes nothing that the agent, the user simulator
-or the grader see.
+instance with no component belongs to orchestration. Tau3 drops a discarded instance's trajectory; its record keeps
+it. A tool that returns its failure as text, as the shell does, marks its call. Setting them changes nothing that the
+agent, the user simulator or the grader see.
 """
 
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Optional
+from typing import Callable, Optional
 
 from tau2.utils.utils import get_now
 
@@ -17,6 +19,8 @@ from tau2.utils.utils import get_now
 attempt: ContextVar[Optional[dict]] = ContextVar("tau2_attempt", default=None)
 # The component being run: (name, orchestrator step, tool call id).
 component: ContextVar[Optional[tuple]] = ContextVar("tau2_component", default=None)
+# The tool call being made: a tool that returns its failure as text, instead of raising, marks it here.
+tool_outcome: ContextVar[Optional[dict]] = ContextVar("tau2_tool_outcome", default=None)
 
 
 @contextmanager
@@ -47,6 +51,31 @@ def in_component(
 def current_instance() -> Optional[dict]:
     record = attempt.get()
     return record["instances"][-1] if record and record["instances"] else None
+
+
+@contextmanager
+def tool_call():
+    """Collect what the tool called inside reports about its own outcome."""
+    outcome = {"reported_failure": False}
+    token = tool_outcome.set(outcome)
+    try:
+        yield outcome
+    finally:
+        tool_outcome.reset(token)
+
+
+def tool_reported_failure() -> None:
+    """Mark the current tool call as failed, for a tool that returns its failure as text, as the shell does."""
+    outcome = tool_outcome.get()
+    if outcome is not None:
+        outcome["reported_failure"] = True
+
+
+def instance_trajectory(get_trajectory: Callable[[], list]) -> None:
+    """Register how to read the current instance's trajectory, so that a discarded instance keeps it."""
+    instance = current_instance()
+    if instance is not None:
+        instance["_trajectory"] = get_trajectory
 
 
 def keys() -> dict:
@@ -96,6 +125,7 @@ def instance_ended(exc: Optional[BaseException]) -> None:
         None if a is None or b is None else b - a
         for a, b in zip(instance.pop("_times"), _thread_times())
     ]
+    get_trajectory = instance.pop("_trajectory", None)
     instance.update(
         end=get_now(),
         status="completed" if exc is None else type(exc).__name__,
@@ -104,6 +134,15 @@ def instance_ended(exc: Optional[BaseException]) -> None:
         on_cpu_seconds=seconds[1],
         run_queue_wait_seconds=seconds[2],
     )
+    if exc is not None and get_trajectory is not None:
+        # Tau3 drops a discarded instance's trajectory. It is kept here, read after the instance's end, and a
+        # failure to read it is recorded, never raised in place of the instance's own exception.
+        try:
+            instance["trajectory"] = [
+                item.model_dump(mode="json") for item in get_trajectory()
+            ]
+        except Exception as error:
+            instance["trajectory_error"] = f"{type(error).__name__}: {error}"
 
 
 def runner_failed(exc: BaseException) -> None:

@@ -10,6 +10,7 @@ during its own __init__.
 """
 
 from tau2.environment.toolkit import ToolKitType, ToolType, is_tool
+from tau2.utils import telemetry
 
 
 def _format_kb_search_result(pipeline, retrieval_result) -> str:
@@ -165,6 +166,7 @@ class ShellMixin(metaclass=ToolKitType):
             The command output (stdout) or error message
         """
         if self._sandbox is None:
+            telemetry.tool_reported_failure()
             return "Error: Sandbox not initialized"
 
         ret_code, stdout, stderr = self._sandbox.run_command(command)
@@ -173,6 +175,7 @@ class ShellMixin(metaclass=ToolKitType):
             # grep returns 1 when no matches (not an error)
             if ret_code == 1 and "grep" in command and not stderr:
                 return "No matches found."
+            telemetry.tool_reported_failure()
             if stderr:
                 return f"Error (exit code {ret_code}): {stderr}"
             return f"Command failed with exit code {ret_code}"

@@ -1,4 +1,5 @@
-"""Passive run telemetry: attempt, instance and component keys, instance records and tool execution time.
+"""Passive run telemetry: attempt, instance and component keys, instance records with discarded trajectories,
+tool execution time and tool-reported failures.
 
 The runs below go through Tau3's own runner, retry loop, orchestrator and evaluator on the mock domain. Only the
 model is scripted, so no model is called.
@@ -25,10 +26,11 @@ from tau2.utils import telemetry
 class ScriptedModel:
     """Replaces `generate` for the agent and the user simulator, and records the telemetry seen at each call."""
 
-    def __init__(self, fail_instances: int = 0):
+    def __init__(self, fail_instances: int = 0, fail_at: int = 0):
         self.fail_instances = (
-            fail_instances  # the first N instances fail on their first agent call
+            fail_instances  # the first N instances fail on an agent call
         )
+        self.fail_at = fail_at  # which of their agent calls fails: 0 is the first
         self.instances: list[str] = []
         self.steps: dict[tuple, int] = defaultdict(int)
         self.calls: list[dict] = []
@@ -53,7 +55,7 @@ class ScriptedModel:
             return AssistantMessage(
                 role="assistant", content="Please list the users." if n == 0 else STOP
             )
-        if self.instances.index(instance) < self.fail_instances:
+        if self.instances.index(instance) < self.fail_instances and n == self.fail_at:
             raise ValueError("unusable agent output")
         if n == 0:
             return AssistantMessage(
@@ -156,10 +158,43 @@ def test_tool_messages_record_execution_time(
 
     tools = [m for m in simulation.messages if m.role == "tool"]
     assert len(tools) == 1 and tools[0].execution_time_seconds >= 0
+    assert tools[0].reported_failure is False
     saved_tools = [
         m for m in saved["simulations"][0]["messages"] if m["role"] == "tool"
     ]
     assert saved_tools[0]["execution_time_seconds"] == tools[0].execution_time_seconds
+
+
+def test_a_tool_that_reports_a_failure_marks_its_message(
+    monkeypatch, domain_name, base_task, tmp_path
+):
+    get_response = Environment.get_response
+
+    def failing(self, message):  # as the shell does for a command that fails
+        telemetry.tool_reported_failure()
+        return get_response(self, message)
+
+    monkeypatch.setattr(Environment, "get_response", failing)
+    with scripted(monkeypatch, ScriptedModel()):
+        simulation, saved = run(domain_name, base_task, tmp_path)
+
+    [tool] = [m for m in simulation.messages if m.role == "tool"]
+    assert tool.reported_failure is True and tool.error is False
+    assert [
+        m["reported_failure"]
+        for m in saved["simulations"][0]["messages"]
+        if m["role"] == "tool"
+    ] == [True]
+
+
+def test_a_tool_outcome_belongs_to_its_call():
+    telemetry.tool_reported_failure()  # outside a tool call: nothing to mark
+    with telemetry.tool_call() as first:
+        telemetry.tool_reported_failure()
+    with telemetry.tool_call() as second:
+        pass
+    assert (first, second) == ({"reported_failure": True}, {"reported_failure": False})
+    assert telemetry.tool_outcome.get() is None
 
 
 def test_kept_instance_record_is_saved(monkeypatch, domain_name, base_task, tmp_path):
@@ -195,6 +230,44 @@ def test_discarded_instances_are_saved_with_their_cause(
     assert [r["id"] for r in records] == model.instances and records[-1][
         "id"
     ] == simulation.id
+    # Their trajectories, as far as they got: the agent failed on its first call.
+    assert [[m["role"] for m in r["trajectory"]] for r in records[:2]] == [
+        ["assistant", "user"]
+    ] * 2
+
+
+def test_a_discarded_instance_keeps_its_trajectory(
+    monkeypatch, domain_name, base_task, tmp_path
+):
+    model = ScriptedModel(fail_instances=1, fail_at=1)  # after its tool call
+    with scripted(monkeypatch, model):
+        simulation, saved = run(domain_name, base_task, tmp_path)
+
+    discarded, kept = saved["simulations"][0]["info"]["instances"]
+    trajectory = discarded["trajectory"]
+    assert [m["role"] for m in trajectory] == ["assistant", "user", "assistant", "tool"]
+    assert trajectory[2]["tool_calls"][0]["name"] == "get_users"
+    assert trajectory[3]["execution_time_seconds"] >= 0
+    assert trajectory[3]["reported_failure"] is False
+    assert [m["turn_idx"] for m in trajectory] == [0, 1, 2, 3]  # as Tau3 numbers them
+    assert discarded["end"] <= kept["start"]
+    # A kept instance's trajectory is the simulation's own.
+    assert "trajectory" not in kept and "_trajectory" not in kept
+    assert len(simulation.messages) == 6
+
+
+def test_a_trajectory_that_cannot_be_read_is_recorded_not_raised():
+    def unreadable():
+        raise RuntimeError("no trajectory")
+
+    with telemetry.in_attempt("t", 0):
+        telemetry.instance_started("i")
+        telemetry.instance_trajectory(unreadable)
+        telemetry.instance_ended(ValueError("agent failed"))
+        [record] = telemetry.attempt.get()["instances"]
+    assert record["status"] == "ValueError"
+    assert record["trajectory_error"] == "RuntimeError: no trajectory"
+    assert "trajectory" not in record and "_trajectory" not in record
 
 
 def test_exhausted_attempt_saves_every_instance(
