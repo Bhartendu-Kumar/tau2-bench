@@ -7,6 +7,7 @@ import numpy as np
 from openai import OpenAI
 
 from tau2.knowledge.embedders.base import BaseEmbedder
+from tau2.utils.telemetry import request_headers
 
 
 class OpenAIEmbedder(BaseEmbedder):
@@ -39,7 +40,9 @@ class OpenAIEmbedder(BaseEmbedder):
         if not texts:
             raise ValueError("No text to embed.")
 
-        response = self.client.embeddings.create(input=texts, model=self.model)
+        response = self.client.embeddings.create(
+            input=texts, model=self.model, extra_headers=request_headers("embed")
+        )
         embeddings = [item.embedding for item in response.data]
         return np.array(embeddings)
 

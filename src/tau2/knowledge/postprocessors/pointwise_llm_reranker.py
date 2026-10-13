@@ -1,3 +1,4 @@
+import contextvars
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Tuple
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 
 from tau2.knowledge.postprocessors.base import BasePostprocessor
 from tau2.knowledge.registry import register_postprocessor
+from tau2.utils.telemetry import request_headers
 
 DEFAULT_MAX_CONCURRENCY = 20
 
@@ -72,6 +74,7 @@ class PointwiseLLMReranker(BasePostprocessor):
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "response_format": RelevanceScore,
+            "extra_headers": request_headers("rerank"),
         }
         if self.reasoning_effort and self.model.startswith(("gpt-5")):
             kwargs["reasoning_effort"] = self.reasoning_effort
@@ -110,8 +113,16 @@ class PointwiseLLMReranker(BasePostprocessor):
             except Exception:
                 return None
 
+        # Each worker runs in a copy of this thread's context, so its requests carry the same telemetry keys.
+        contexts = [contextvars.copy_context() for _ in docs_to_rate]
         with ThreadPoolExecutor(max_workers=self.max_concurrency) as executor:
-            results = list(executor.map(rate_doc, docs_to_rate))
+            results = list(
+                executor.map(
+                    lambda context, args: context.run(rate_doc, args),
+                    contexts,
+                    docs_to_rate,
+                )
+            )
 
         rated_results = [
             (doc_id, float(rating))

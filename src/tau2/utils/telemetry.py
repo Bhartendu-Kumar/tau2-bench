@@ -8,10 +8,13 @@ it. A tool that returns its failure as text, as the shell does, marks its call. 
 agent, the user simulator or the grader see.
 """
 
+import os
 import time
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable, Optional
+from urllib.parse import quote
 
 from tau2.utils.utils import get_now
 
@@ -91,6 +94,29 @@ def keys() -> dict:
         "component": name,
         "step": step,
         "tool_call_id": tool_call_id,
+    }
+
+
+# The run that a model gateway's log should attribute requests to, set by whoever starts the run.
+RUN_ID_ENV = "AGENTRX_RUN_ID"
+
+
+def request_headers(call_name: Optional[str] = None) -> dict:
+    """HTTP headers that tag one model request with the work that made it, so that a model gateway's log can
+    attribute the request: the run (from AGENTRX_RUN_ID), the attempt's task and trial, the instance, the component,
+    the orchestrator step, the tool call, the call's name, and a new id for this call. A client's retries of the call
+    resend the same headers, so the gateway groups them under one call id. Values are percent-encoded so that any
+    id is a valid header value; a value that is None is left out."""
+    values = {
+        "run-id": os.environ.get(RUN_ID_ENV),
+        **{name.replace("_", "-"): value for name, value in keys().items()},
+        "call-name": call_name,
+        "call-id": uuid.uuid4().hex,
+    }
+    return {
+        f"x-agentrx-{name}": quote(str(value), safe="")
+        for name, value in values.items()
+        if value is not None
     }
 
 
