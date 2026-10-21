@@ -25,6 +25,31 @@ component: ContextVar[Optional[tuple]] = ContextVar("tau2_component", default=No
 # The tool call being made: a tool that returns its failure as text, instead of raising, marks it here.
 tool_outcome: ContextVar[Optional[dict]] = ContextVar("tau2_tool_outcome", default=None)
 
+# Model-service and access failures can happen while the agent component is active but are not known to be caused by
+# the agent. They remain eligible for Tau3's conversation retry. Other exceptions raised while the agent runs are
+# agent failures. Keep this narrow: an uncertain failure should still retry.
+RETRYABLE_AGENT_FAILURES = frozenset(
+    {
+        "APIConnectionError",
+        "APIError",
+        "APIResponseValidationError",
+        "APIStatusError",
+        "APITimeoutError",
+        "AuthenticationError",
+        "BadGatewayError",
+        "BudgetExceededError",
+        "ConflictError",
+        "ContentPolicyViolationError",
+        "InternalServerError",
+        "NotFoundError",
+        "PermissionDeniedError",
+        "RateLimitError",
+        "ServiceUnavailableError",
+        "Timeout",
+    }
+)
+REPLAY_MISMATCH = ("Tool call:\n", "\n\nReturned:\n", "\n\nExpected:\n")
+
 
 @contextmanager
 def in_attempt(task_id: str, trial: int):
@@ -176,6 +201,24 @@ def runner_failed(exc: BaseException) -> None:
     instance = current_instance()
     if instance is not None and instance.get("status") == "completed":
         instance.update(status=type(exc).__name__, error=str(exc), component="runner")
+
+
+def known_agent_failure() -> bool:
+    """Whether the current discarded instance failed for a reason confidently caused by the agent.
+
+    Stop Tau3's conversation retry only for these cases. A failure raised while the agent runs is the agent's unless
+    its exception class names a model-service, timeout or access failure. A grader replay mismatch is also the
+    agent's: only agent code can change a tool result already recorded in its conversation.
+    """
+    instance = current_instance() or {}
+    status, component_name, error = instance.get("status"), instance.get("component"), instance.get("error") or ""
+    if component_name == "agent":
+        return status not in RETRYABLE_AGENT_FAILURES
+    return (
+        component_name == "evaluation"
+        and error.startswith(REPLAY_MISMATCH[0])
+        and all(part in error for part in REPLAY_MISMATCH[1:])
+    )
 
 
 def attach_instances(simulation) -> None:

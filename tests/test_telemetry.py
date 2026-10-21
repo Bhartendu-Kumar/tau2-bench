@@ -215,25 +215,21 @@ def test_kept_instance_record_is_saved(monkeypatch, domain_name, base_task, tmp_
         assert record["on_cpu_seconds"] >= 0 and record["run_queue_wait_seconds"] >= 0
 
 
-def test_discarded_instances_are_saved_with_their_cause(
+def test_agent_failure_is_saved_with_its_cause_without_another_instance(
     monkeypatch, domain_name, base_task, tmp_path
 ):
     model = ScriptedModel(fail_instances=2)
     with scripted(monkeypatch, model):
         simulation, saved = run(domain_name, base_task, tmp_path)
 
-    assert simulation.termination_reason == TerminationReason.USER_STOP
+    assert simulation.termination_reason == TerminationReason.INFRASTRUCTURE_ERROR
     records = saved["simulations"][0]["info"]["instances"]
-    assert [r["status"] for r in records] == ["ValueError", "ValueError", "completed"]
-    assert [r["component"] for r in records[:2]] == ["agent", "agent"]
+    assert [r["status"] for r in records] == ["ValueError"]
+    assert [r["component"] for r in records] == ["agent"]
     assert records[0]["error"] == "unusable agent output"
-    assert [r["id"] for r in records] == model.instances and records[-1][
-        "id"
-    ] == simulation.id
-    # Their trajectories, as far as they got: the agent failed on its first call.
-    assert [[m["role"] for m in r["trajectory"]] for r in records[:2]] == [
-        ["assistant", "user"]
-    ] * 2
+    assert [r["id"] for r in records] == model.instances
+    assert simulation.id not in model.instances  # the failed placeholder never ran
+    assert [m["role"] for m in records[0]["trajectory"]] == ["assistant", "user"]
 
 
 def test_a_discarded_instance_keeps_its_trajectory(
@@ -243,17 +239,16 @@ def test_a_discarded_instance_keeps_its_trajectory(
     with scripted(monkeypatch, model):
         simulation, saved = run(domain_name, base_task, tmp_path)
 
-    discarded, kept = saved["simulations"][0]["info"]["instances"]
+    [discarded] = saved["simulations"][0]["info"]["instances"]
     trajectory = discarded["trajectory"]
     assert [m["role"] for m in trajectory] == ["assistant", "user", "assistant", "tool"]
     assert trajectory[2]["tool_calls"][0]["name"] == "get_users"
     assert trajectory[3]["execution_time_seconds"] >= 0
     assert trajectory[3]["reported_failure"] is False
     assert [m["turn_idx"] for m in trajectory] == [0, 1, 2, 3]  # as Tau3 numbers them
-    assert discarded["end"] <= kept["start"]
-    # A kept instance's trajectory is the simulation's own.
-    assert "trajectory" not in kept and "_trajectory" not in kept
-    assert len(simulation.messages) == 6
+    assert simulation.termination_reason == TerminationReason.INFRASTRUCTURE_ERROR
+    assert simulation.info["retry_stopped_by"] == "agent_failure"
+    assert simulation.messages == []
 
 
 def test_a_trajectory_that_cannot_be_read_is_recorded_not_raised():
@@ -270,7 +265,7 @@ def test_a_trajectory_that_cannot_be_read_is_recorded_not_raised():
     assert "trajectory" not in record and "_trajectory" not in record
 
 
-def test_exhausted_attempt_saves_every_instance(
+def test_known_agent_failure_stops_the_retry_loop(
     monkeypatch, domain_name, base_task, tmp_path
 ):
     model = ScriptedModel(fail_instances=10)
@@ -279,8 +274,61 @@ def test_exhausted_attempt_saves_every_instance(
 
     assert simulation.termination_reason == TerminationReason.INFRASTRUCTURE_ERROR
     records = saved["simulations"][0]["info"]["instances"]
-    assert [r["status"] for r in records] == ["ValueError"] * 3
+    assert [r["status"] for r in records] == ["ValueError"]
+    assert simulation.info["failed_after_attempts"] == 1
+    assert simulation.info["retry_stopped_by"] == "agent_failure"
     assert simulation.id not in [r["id"] for r in records]  # the placeholder never ran
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        ({"status": "ValueError", "component": "agent", "error": "candidate failed"}, True),
+        ({"status": "RateLimitError", "component": "agent", "error": "429"}, False),
+        (
+            {
+                "status": "ValueError",
+                "component": "evaluation",
+                "error": "Tool call:\nx\n\nReturned:\ny\n\nExpected:\nz",
+            },
+            True,
+        ),
+        ({"status": "ValueError", "component": "evaluation", "error": "grader failed"}, False),
+        ({"status": "OSError", "component": "runner", "error": "disk full"}, False),
+    ],
+)
+def test_only_confident_agent_failures_stop_retries(record, expected):
+    with telemetry.in_attempt("task", 0):
+        telemetry.attempt.get()["instances"].append(record)
+        assert telemetry.known_agent_failure() is expected
+
+
+def test_model_service_failure_keeps_the_retry_loop(base_task):
+    RateLimitError = type("RateLimitError", (Exception,), {})
+    attempts = []
+
+    def run_fn():
+        attempts.append(len(attempts))
+        telemetry.instance_started(f"instance-{len(attempts)}")
+        error = RateLimitError("rate limited")
+        with telemetry.in_component("agent"):
+            telemetry.instance_ended(error)
+        raise error
+
+    with telemetry.in_attempt(base_task.id, 0):
+        simulation = run_with_retry(
+            run_fn,
+            base_task,
+            0,
+            1,
+            max_retries=2,
+            retry_delay=0.0,
+            console_display=False,
+        )
+
+    assert len(attempts) == 3
+    assert simulation.info["failed_after_attempts"] == 3
+    assert "retry_stopped_by" not in simulation.info
 
 
 def test_runner_error_after_a_completed_instance_names_the_runner(base_task):

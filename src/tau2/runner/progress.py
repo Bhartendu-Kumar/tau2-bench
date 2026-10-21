@@ -32,8 +32,9 @@ def run_with_retry(
 ) -> SimulationRun:
     """Run a simulation function with retry logic.
 
-    Retries on any exception. If all retries are exhausted, returns a failed
-    SimulationRun with INFRASTRUCTURE_ERROR instead of raising.
+    Retries exceptions unless telemetry can confidently attribute the failure to
+    the agent. If retries are exhausted, or a known agent failure stops them,
+    returns a failed SimulationRun with INFRASTRUCTURE_ERROR instead of raising.
 
     Args:
         run_fn: A callable that produces a SimulationRun.
@@ -54,6 +55,8 @@ def run_with_retry(
     last_exception = None
     last_error_reason = ""
     last_traceback = ""
+    attempts_made = 0
+    retry_stopped_by = None
 
     for attempt in range(max_attempts):
         if shutdown_event is not None and shutdown_event.is_set():
@@ -63,6 +66,7 @@ def run_with_retry(
             break
 
         try:
+            attempts_made = attempt + 1
             if attempt > 0:
                 retry_text = Text(
                     text=f"  Retry {attempt}/{max_retries} for task {task.id}: {last_error_reason}",
@@ -96,6 +100,13 @@ def run_with_retry(
             last_exception = e
             last_error_reason = str(e)
             last_traceback = traceback.format_exc()
+            if telemetry.known_agent_failure():
+                retry_stopped_by = "agent_failure"
+                logger.error(
+                    f"Task {task.id} failed from a known agent failure "
+                    f"(attempt {attempt + 1}/{max_attempts}); not retrying: {e}"
+                )
+                break
             if attempt < max_attempts - 1:
                 logger.warning(
                     f"Task {task.id} failed (attempt {attempt + 1}/{max_attempts}): {e}"
@@ -107,7 +118,7 @@ def run_with_retry(
 
     # All retries exhausted
     error_text = Text(
-        text=f"  Task {task.id} failed permanently after {max_attempts} attempts: {last_error_reason}",
+        text=f"  Task {task.id} failed permanently after {attempts_made} attempts: {last_error_reason}",
         style="bold red",
     )
     ConsoleDisplay.console.print(error_text)
@@ -128,7 +139,12 @@ def run_with_retry(
             "error": str(last_exception),
             "error_type": type(last_exception).__name__,
             "error_traceback": last_traceback,
-            "failed_after_attempts": max_attempts,
+            "failed_after_attempts": attempts_made,
+            **(
+                {"retry_stopped_by": retry_stopped_by}
+                if retry_stopped_by is not None
+                else {}
+            ),
         },
     )
     telemetry.attach_instances(failed_simulation)
