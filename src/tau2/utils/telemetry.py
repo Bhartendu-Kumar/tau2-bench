@@ -28,6 +28,8 @@ tool_outcome: ContextVar[Optional[dict]] = ContextVar("tau2_tool_outcome", defau
 # Model-service and access failures can happen while the agent component is active but are not known to be caused by
 # the agent. They remain eligible for Tau3's conversation retry. Other exceptions raised while the agent runs are
 # agent failures. Keep this narrow: an uncertain failure should still retry.
+# TODO(gagan): Re-audit this list before upgrading LiteLLM, OpenAI or Azure client dependencies. A new provider
+# exception class that is absent here would be treated as an agent failure and stop the fresh-conversation retry.
 RETRYABLE_AGENT_FAILURES = frozenset(
     {
         "APIConnectionError",
